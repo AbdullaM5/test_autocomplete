@@ -3,11 +3,12 @@ import asyncio
 import logging
 import sys
 
-logger = logging.getLogger('autocomplete-client')
-logger_stream_handler_formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
-logger_stream_handler = logging.StreamHandler(sys.stdout)
-logger_stream_handler.setFormatter(logger_stream_handler_formatter)
-logger.addHandler(logger_stream_handler)
+logging.basicConfig(
+    format='%(asctime)s %(name)s %(levelname)s %(message)s',
+    stream=sys.stdout
+)
+
+logger = logging.getLogger('client')
 logger.setLevel(logging.DEBUG)
 
 

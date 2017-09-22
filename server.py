@@ -6,11 +6,12 @@ import sys
 import typing
 from functools import lru_cache
 
-logger = logging.getLogger('autocomplete-server')
-logger_stream_handler_formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
-logger_stream_handler = logging.StreamHandler(sys.stdout)
-logger_stream_handler.setFormatter(logger_stream_handler_formatter)
-logger.addHandler(logger_stream_handler)
+logging.basicConfig(
+    format='%(asctime)s %(name)s %(levelname)s %(message)s',
+    stream=sys.stdout
+)
+
+logger = logging.getLogger('server')
 logger.setLevel(logging.DEBUG)
 
 WordFrequency = typing.NamedTuple('WordFrequency', [('word', str), ('frequency', int)])
