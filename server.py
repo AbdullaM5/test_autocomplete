@@ -1,71 +1,103 @@
 import argparse
+import asyncio
+import logging
+import re
+import sys
 import typing
-from collections import namedtuple
-from socketserver import ThreadingTCPServer, BaseRequestHandler
+from functools import lru_cache
 
-WordFrequency = namedtuple('WordFrequency', ['word', 'frequency'])
+logger = logging.getLogger('autocomplete-server')
+logger_stream_handler_formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
+logger_stream_handler = logging.StreamHandler(sys.stdout)
+logger_stream_handler.setFormatter(logger_stream_handler_formatter)
+logger.addHandler(logger_stream_handler)
+logger.setLevel(logging.DEBUG)
 
-
-class Server(ThreadingTCPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-    def __init__(self, server_address, request_handler_class, word_freq_file_path):
-        super(Server, self).__init__(server_address, request_handler_class)
-        self.word_freq_set = set()
-        self.get_word_freq_set_from_txt(word_freq_file_path)
-
-    def get_word_freq_set_from_txt(self, path):
-        with open(path, 'r') as f:
-            [self.word_freq_set.add(WordFrequency(*line.split(' ')[:2]))
-             for line in f.readlines()]
+WordFrequency = typing.NamedTuple('WordFrequency', [('word', str), ('frequency', int)])
 
 
-class AutocompleteRequestHandler(BaseRequestHandler):
-    def handle(self):
-        while True:
+class CommandParseError(Exception):
+    def __init__(self, message):
+        self.message: str = message
+
+
+class SuggestionsNotFoundError(Exception):
+    def __init__(self, message):
+        self.message: str = message
+
+
+class AutocompleteServerProtocol(asyncio.Protocol):
+    transport: asyncio.Transport = None
+
+    def __init__(self, word_freq_file_path: str):
+        self.word_freq_set = self.get_word_freq_set_from_txt(path=word_freq_file_path)
+
+    def connection_made(self, transport):
+        self.transport: asyncio.Transport = transport
+        logger.debug('Connected {}:{}'.format(*self.transport.get_extra_info('peername')))
+        self.write('This is autocomplete service.\n'
+                   'Service accepts commands, which\n'
+                   'matches \'get <prefix>\' pattern')
+
+    def data_received(self, data: bytes):
+        logger.debug('Data received: {}'.format(data.decode()))
+        try:
+            command, prefix = self.parse_command(data)
+        except CommandParseError as error:
+            self.write(error.message)
+        except:
+            self.write('Something gone wrong, please try again')
+        else:
             try:
-                data = self.request.recv(1024).decode('utf-8').strip().lower()
-                if data == '/quit':
-                    break
-                try:
-                    command, prefix, *_ = data.split(' ')
-                    if not command or command != 'get':
-                        self.send_message('Command should be set and equal to \'get\'\n')
-                        continue
-                    if not prefix or 15 < len(prefix) <= 0:
-                        self.send_message('Prefix is required. Its length should be in between 1 and 15 characters.\n')
-                        continue
+                suggestions = self.get_suggestions(prefix)
+            except SuggestionsNotFoundError as error:
+                self.write(error.message)
+            else:
+                self.write(suggestions)
+        logger.debug('Cache info: {}'.format(self._get_suggestions.cache_info()))
 
-                    suggestions = self.get_suggestions(prefix)
-                    if suggestions and len(suggestions) > 0:
-                        self.send_message(self.prepare_suggestions_response(suggestions))
-                        continue
-                    else:
-                        self.send_message('No suggestions.\n')
+    def connection_lost(self, exc):
+        logger.debug('Disconnected {}:{}'.format(*self.transport.get_extra_info('peername')))
+        self.transport.close()
 
-                except ValueError:
-                    self.send_message('ValueError. Please, try again.\n')
-                    continue
-            except ConnectionError:
-                break
-            except UnicodeDecodeError:
-                self.send_message('UnicodeDecodeError. Please, try again.\n')
-                continue
-
-        self.request.close()
-
-    def send_message(self, message):
-        self.request.send(message.encode('utf-8'))
-
-    def get_suggestions(self, prefix: str):
-        _filter = filter(lambda i: i.word.startswith(prefix.lower()), self.server.word_freq_set)
-        _sorted = sorted(_filter, key=lambda i: (-int(i[1]), i[0]))
-        return _sorted[:10]
+    def write(self, message: str):
+        end = '' if message.endswith('\n') else '\n'
+        self.transport.write(f'{message}{end}'.encode())
 
     @staticmethod
-    def prepare_suggestions_response(sugggestions: typing.List[WordFrequency]):
-        return ''.join(['-> %s\n' % item.word for item in sugggestions])
+    def parse_command(data: bytes) -> typing.Tuple[str, str]:
+        pattern = r'^(get) ([a-zA-Z]{1,15})$'
+        data = data.decode().strip()
+        match = re.match(pattern, data, re.IGNORECASE)
+        if not match:
+            raise CommandParseError('Command should match patter \'get <prefix:str>\'')
+        return match.group(1, 2)
+
+    @staticmethod
+    @lru_cache()
+    def _get_suggestions(prefix: str, word_freq_set: typing.FrozenSet[WordFrequency]):
+        _filter = filter(lambda i: i.word.startswith(prefix), word_freq_set)
+        _sorted = sorted(_filter, key=lambda i: (-i.frequency, i.word))
+        return _sorted[:10]
+
+    def get_suggestions(self, prefix: str) -> str:
+        suggestions = self._get_suggestions(prefix, self.word_freq_set)
+        if len(suggestions) < 1:
+            raise SuggestionsNotFoundError('Suggestions not found')
+        return '\n'.join(f'-> {item.word}' for item in suggestions)
+
+    @staticmethod
+    def get_word_freq_from_line(line: str) -> WordFrequency:
+        word, freq, *_ = line.split(' ')
+        freq = int(freq)
+        return WordFrequency(word, freq)
+
+    def get_word_freq_set_from_txt(self, path: str) -> typing.FrozenSet[WordFrequency]:
+        result = set()
+        with open(path, 'r') as f:
+            [result.add(self.get_word_freq_from_line(line))
+             for line in f.readlines()]
+        return frozenset(result)
 
 
 if __name__ == '__main__':
@@ -74,10 +106,24 @@ if __name__ == '__main__':
     parser.add_argument('--port', default=10000, type=int)
     args = parser.parse_args()
 
-    server = Server(('', args.port), AutocompleteRequestHandler, args.filename)
+    loop = asyncio.get_event_loop()
+    # loop.set_debug(enabled=True)
+
+    coro = loop.create_server(
+        protocol_factory=lambda: AutocompleteServerProtocol(word_freq_file_path=args.filename),
+        host='0.0.0.0', port=args.port
+    )
+    server = loop.run_until_complete(coro)
+
+    for socket in server.sockets:
+        logger.debug('Server running {}:{}'.format(*socket.getsockname()))
+
     try:
-        print('Server running at {}:{}'.format(server.server_address[0], server.server_address[1]))
-        server.serve_forever()
+        loop.run_forever()
     except KeyboardInterrupt:
-        server.shutdown()
-        print('Server stopped')
+        pass
+    finally:
+        server.close()
+        loop.run_until_complete(server.wait_closed())
+
+    loop.close()

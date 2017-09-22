@@ -1,36 +1,66 @@
 import argparse
-import socket
-import threading
+import asyncio
+import logging
+import sys
+
+logger = logging.getLogger('autocomplete-client')
+logger_stream_handler_formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
+logger_stream_handler = logging.StreamHandler(sys.stdout)
+logger_stream_handler.setFormatter(logger_stream_handler_formatter)
+logger.addHandler(logger_stream_handler)
+logger.setLevel(logging.DEBUG)
 
 
-class Client(object):
-    def __init__(self, host, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((host, port))
+class AutocompleteClientProtocol(asyncio.Protocol):
+    loop = None
+    queue = None
+    transport = None
 
-    def send_message(self):
+    def __init__(self, event_loop):
+        self.loop: asyncio.AbstractEventLoop = event_loop
+        task = self.loop.create_task(self.prompt_loop())
+        asyncio.ensure_future(task)
+
+    def connection_made(self, transport: asyncio.Transport):
+        self.transport: asyncio.Transport = transport
+        logger.debug('Connected to server at {}:{}'.format(*self.transport.get_extra_info('peername')))
+
+    def data_received(self, data: bytes):
+        print(data.decode())
+
+    def connection_lost(self, exc):
+        self.transport.close()
+
+    async def prompt_loop(self):
+        reader = asyncio.StreamReader(loop=self.loop)
+        reader_protocol = asyncio.StreamReaderProtocol(stream_reader=reader, loop=self.loop)
+        await self.loop.connect_read_pipe(lambda: reader_protocol, sys.stdin)
         while True:
-            self.sock.send(input().encode('utf-8'))
-
-    def receive_message(self):
-        while True:
-            data = self.sock.recv(1024).decode('utf-8')
-            if not data:
+            try:
+                cmd = await reader.readline()
+            except KeyboardInterrupt:
                 break
-            print(data)
+            else:
+                self.transport.write(cmd)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--host', default='', type=str)
+    parser.add_argument('--host', default='0.0.0.0', type=str)
     parser.add_argument('--port', default=10000, type=int)
     args = parser.parse_args()
 
+    loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+    loop.set_debug(enabled=True)
+
+    coro = loop.create_connection(
+        protocol_factory=lambda: AutocompleteClientProtocol(loop),
+        host=args.host, port=args.port
+    )
+    loop.run_until_complete(coro)
+
     try:
-        client = Client(args.host, args.port)
-        threads = [threading.Thread(target=client.send_message, daemon=True),
-                   threading.Thread(target=client.receive_message, daemon=True)]
-        [thread.start() for thread in threads]
-        [thread.join() for thread in threads]
+        loop.run_forever()
     except KeyboardInterrupt:
         pass
+    loop.close()
