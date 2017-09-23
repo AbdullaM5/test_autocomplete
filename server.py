@@ -6,6 +6,8 @@ import sys
 import typing
 from functools import lru_cache
 
+from exceptions import CommandParseError, SuggestionsNotFoundError
+
 logging.basicConfig(
     format='%(asctime)s %(name)s %(levelname)s %(message)s',
     stream=sys.stdout
@@ -15,16 +17,6 @@ logger = logging.getLogger('server')
 logger.setLevel(logging.DEBUG)
 
 WordFrequency = typing.NamedTuple('WordFrequency', [('word', str), ('frequency', int)])
-
-
-class CommandParseError(Exception):
-    def __init__(self, message):
-        self.message: str = message
-
-
-class SuggestionsNotFoundError(Exception):
-    def __init__(self, message):
-        self.message: str = message
 
 
 class AutocompleteServerProtocol(asyncio.Protocol):
